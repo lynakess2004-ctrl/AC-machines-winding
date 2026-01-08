@@ -1304,7 +1304,3 @@ if (themeToggleBtn) {
     });
 }
 
-        themeToggleBtn.textContent = isLight ? '🌙 Dark' : '☀️ Light';
-    });
-}
-
