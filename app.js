@@ -1,15 +1,20 @@
 // ========= Globals =========
+let animRunning = false;
+let animIndex   = 0;
+let animTimer   = null;
 
 const colors = {
-    A_pos: '#FF6B6B',
-    A_neg: '#FFB3B3',
-    B_pos: '#4ECDC4',
-    B_neg: '#A8E6E3',
-    C_pos: '#FFE66D',
-    C_neg: '#FFF4B8'
+    A_pos: '#fc2424ff',
+    A_neg: '#ad5858ff',
+    B_pos: '#11c4b8ff',
+    B_neg: '#5d9996ff',
+    C_pos: '#ebcb2fff',
+    C_neg: '#ddce7cff'
 };
 
+
 let currentWinding = null;
+let coils = []; // list of coils in series-connected order
 let activePhaseFilter = 'ALL';   // 'ALL' | 'A' | 'B' | 'C'
 let activeLayerFilter = 'BOTH';  // 'BOTH' | 'TOP' | 'BOTTOM'
 let lastComboLabel = '';
@@ -59,7 +64,7 @@ function setPhaseFilter(phase) {
     activePhaseFilter = phase;
     if (currentWinding) {
         const Z = currentWinding.length;
-        drawLinearDiagram(currentWinding, Z, 0);
+        drawLinearDiagram(currentWinding, Z);
         drawCircularDiagram(currentWinding, Z);
     }
 }
@@ -68,7 +73,7 @@ function setLayerFilter(layer) {
     activeLayerFilter = layer;
     if (currentWinding) {
         const Z = currentWinding.length;
-        drawLinearDiagram(currentWinding, Z, 0);
+        drawLinearDiagram(currentWinding, Z);
         drawCircularDiagram(currentWinding, Z);
     }
 }
@@ -81,11 +86,13 @@ function gcd(a, b) {
 
 function calculate() {
     try {
-        const Z  = parseInt(document.getElementById('slots').value);
-        const p2 = parseInt(document.getElementById('poles').value);
-        const m  = parseInt(document.getElementById('phases').value);
+        // ---- inputs ----
+        const Z  = parseInt(document.getElementById('slots').value, 10);
+        const p2 = parseInt(document.getElementById('poles').value, 10);
+        const m  = parseInt(document.getElementById('phases').value, 10);
         const pitchTypeSel = document.getElementById('pitchType').value;
 
+        // ---- validation ----
         if (!Z || !p2 || !m || Z < 6 || p2 < 2 || m < 3) {
             throw new Error('Please enter valid values (Z≥6, 2p≥2, m≥3)');
         }
@@ -93,27 +100,39 @@ function calculate() {
             throw new Error('Number of poles must be even');
         }
 
+        // ---- basic quantities ----
         const p   = p2 / 2;
-        const tau = Z / p2;
+        const tau = Z / p2;          // pole pitch (slots)
 
-        // Coil pitch y: full vs short
+        // ---- coil pitch y from offset ----
         let y;
+        const tauBase = Math.round(tau);   // nearest integer pole pitch
+
         if (pitchTypeSel === 'short') {
-            const tauBase = Math.floor(tau);
-            const customPitch = parseInt(document.getElementById('coilPitch').value);
-            if (customPitch && customPitch > 0 && customPitch <= tauBase) {
-                y = customPitch;
-            } else {
-                y = tauBase;
-            }
+            // user enters offset in slots: 0 = full pitch, 1 = τ−1, ...
+            const offsetInput = parseInt(
+                document.getElementById('coilOffset').value,
+                10
+            );
+
+            // default to 1 slot short-pitch if invalid
+            const offset = Number.isInteger(offsetInput) &&
+                           offsetInput >= 1 &&
+                           offsetInput < tauBase
+                ? offsetInput
+                : 1;
+
+            y = tauBase - offset;    // short-pitch: y = τ − offset
         } else {
-            y = Math.round(tau);
+            // full-pitch: y ≈ τ
+            y = tauBase;
         }
 
-        const q     = Z / (p2 * m);
-        const alpha = (360 * p) / Z;
-        const beta  = y / tau;
+        const q     = Z / (p2 * m);  // slots per pole per phase
+        const alpha = (360 * p) / Z; // electrical angle between slots (deg)
+        const beta  = y / tau;       // pitch ratio
 
+        // ---- winding factors ----
         const Kp = Math.sin((beta * Math.PI) / 2);
 
         let Kd;
@@ -121,24 +140,28 @@ function calculate() {
             const alphaRad = (alpha * Math.PI) / 180;
             Kd = Math.sin((q * alphaRad) / 2) / (q * Math.sin(alphaRad / 2));
         } else {
-            const num = gcd(Z, p2);
-            const t   = Z / num;
+            const num      = gcd(Z, p2);
+            const t        = Z / num;
             const alphaRad = (alpha * Math.PI) / 180;
             Kd = Math.sin((t * alphaRad) / 2) / (t * Math.sin(alphaRad / 2));
         }
 
         const Kw = Kp * Kd;
 
-        const winding = generateWindingScheme(Z, p2, m, y, tau);
-        currentWinding = winding;
+        // ---- generate winding & coils (series‑connected) ----
+        const { slots, coilList } = generateWindingScheme(Z, p2, m, y, tau);
+        currentWinding = slots;
+        coils          = coilList;
 
-        const phaseCoilCount = { A: 0, B: 0, C: 0 };
-        const topLayerUsed = new Set();
+        // ---- statistics from layout ----
+        const phaseCoilCount  = { A: 0, B: 0, C: 0 };
+        const topLayerUsed    = new Set();
         const bottomLayerUsed = new Set();
 
-        winding.forEach((slot, idx) => {
+        slots.forEach((slot, idx) => {
             if (slot.top) {
-                phaseCoilCount[slot.top.phase] = (phaseCoilCount[slot.top.phase] || 0) + 1;
+                phaseCoilCount[slot.top.phase] =
+                    (phaseCoilCount[slot.top.phase] || 0) + 1;
                 topLayerUsed.add(idx);
             }
             if (slot.bottom) bottomLayerUsed.add(idx);
@@ -146,13 +169,14 @@ function calculate() {
 
         const allSlotsUsedTop    = topLayerUsed.size === Z;
         const allSlotsUsedBottom = bottomLayerUsed.size === Z;
-        const actualQ = phaseCoilCount.A / (p2 / 2);
+        const actualQ            = phaseCoilCount.A / (p2 / 2);
 
+        // ---- UI updates ----
         displayResults(
             Z, p2, m,
             tau, y, q, alpha, beta,
             Kp, Kd, Kw,
-            winding,
+            slots,
             actualQ,
             phaseCoilCount,
             allSlotsUsedTop,
@@ -161,9 +185,9 @@ function calculate() {
 
         createLegend('legendLinear');
         createLegend('legendCircular');
-        drawLinearDiagram(winding, Z, y);
-        drawCircularDiagram(winding, Z);
-        createWindingTable(winding);
+        drawLinearDiagram(slots, Z);
+        drawCircularDiagram(slots, Z);
+        createWindingTable(slots);
 
         document.getElementById('errorAlert').classList.remove('active');
         document.getElementById('results').style.display = 'block';
@@ -177,20 +201,82 @@ function calculate() {
     }
 }
 
-// ========= Winding generation =========
+function redrawWithAnimation() {
+    if (!currentWinding || !coils.length) return;
+    const Z = currentWinding.length;
+
+    // clone coils array up to animIndex
+    const visibleCoils = coils.slice(0, animIndex);
+
+    // temporarily replace global coils when drawing
+    const saved = coils;
+    coils = visibleCoils;
+    drawLinearDiagram(currentWinding, Z);
+    drawCircularDiagram(currentWinding, Z);
+    coils = saved;
+}
+function stepAnimation() {
+    if (!currentWinding || !coils.length) return;
+    if (animIndex < coils.length) {
+        animIndex++;
+        redrawWithAnimation();
+    } else {
+        animRunning = false;
+        clearInterval(animTimer);
+        animTimer = null;
+    }
+}
+
+function startWindingAnimation() {
+    if (!currentWinding || !coils.length) return;
+    if (animRunning) return;
+    animRunning = true;
+
+    const speedSlider = document.getElementById('animSpeed');
+    const speedFactor = speedSlider ? parseFloat(speedSlider.value) : 1;
+    const baseInterval = 700; // ms per coil at speed 1
+    const interval = baseInterval / speedFactor;
+
+    stepAnimation(); // draw first/next immediately
+    animTimer = setInterval(stepAnimation, interval);
+}
+
+function pauseWindingAnimation() {
+    animRunning = false;
+    if (animTimer) {
+        clearInterval(animTimer);
+        animTimer = null;
+    }
+}
+
+function resetWindingAnimation() {
+    pauseWindingAnimation();
+    animIndex = 0;
+    // redraw with no coils or with full winding, your choice:
+    redrawWithAnimation(); // shows slots only
+    // or: drawLinearDiagram(currentWinding, currentWinding.length);
+    //     drawCircularDiagram(currentWinding, currentWinding.length);
+}
+
+// ========= Winding generation with SERIES CONNECTION =========
 
 function generateWindingScheme(Z, p2, m, y, tau) {
     const slots = [];
     for (let i = 0; i < Z; i++) {
-        slots.push({ slot: i + 1, top: null, bottom: null });
+        slots.push({
+            slot: i + 1,
+            top: null,
+            bottom: null
+        });
     }
 
     const q = Z / (m * p2);
     const isIntegerQ = Number.isInteger(q);
     const phaseSequence = ['A', 'B', 'C'];
+    const coilList = [];
 
     if (isIntegerQ && m === 3) {
-        // Integer q, 3-phase
+        // ===== Integer-slot, 3-phase =====
         const alpha = (360 * (p2 / 2)) / Z;
         const deltaSlots = Math.round(120 / alpha);
 
@@ -202,108 +288,135 @@ function generateWindingScheme(Z, p2, m, y, tau) {
         const coilsPerPhasePerPole = q;
         const polePitchSlots = Z / p2;
 
-        // top layer
-        for (let pole = 0; pole < p2; pole++) {
-            for (const phase of phaseSequence) {
+        let coilId = 1;
+
+        for (const phase of phaseSequence) {
+            for (let pole = 0; pole < p2; pole++) {
+                const localCoils = [];
                 const baseStart = phaseStartSlots[phase];
+
+                // build coils for this phase & pole
                 for (let c = 0; c < coilsPerPhasePerPole; c++) {
                     const slotIndex =
                         (baseStart +
                          Math.round(pole * polePitchSlots) +
                          c) % Z;
 
-                    if (!slots[slotIndex].top) {
-                        const endSlot = (slotIndex + y) % Z;
-                        slots[slotIndex].top = {
-                            phase,
-                            polarity: pole % 2 === 0 ? 'pos' : 'neg',
-                            pole: Math.floor(pole / 2) + 1,
-                            coilEnd: endSlot + 1,
-                            layer: 'top'
-                        };
-                    }
-                }
-            }
-        }
+                    const endSlotIndex = (slotIndex + y) % Z;
 
-        // bottom layer returns
-        for (let i = 0; i < Z; i++) {
-            if (slots[i].top && slots[i].top.coilEnd) {
-                const endSlotIndex = (slots[i].top.coilEnd - 1 + Z) % Z;
-                if (slots[endSlotIndex] && !slots[endSlotIndex].bottom) {
-                    slots[endSlotIndex].bottom = {
-                        phase: slots[i].top.phase,
-                        polarity: slots[i].top.polarity === 'pos' ? 'neg' : 'pos',
-                        pole: slots[i].top.pole,
-                        coilStart: i + 1,
+                    localCoils.push({
+                        id: coilId++,
+                        phase,
+                        pole: Math.floor(pole / 2) + 1,
+                        startSlot: slotIndex + 1,
+                        endSlot: endSlotIndex + 1,
+                        polarity: pole % 2 === 0 ? 'pos' : 'neg',
+                        nextCoil: null
+                    });
+                }
+
+                // order around stator and link in series
+                localCoils.sort((c1, c2) => c1.startSlot - c2.startSlot);
+                for (let i = 0; i < localCoils.length - 1; i++) {
+                    localCoils[i].nextCoil = localCoils[i + 1].id;
+                }
+
+                // write into slots and push to global list
+                localCoils.forEach(coil => {
+                    const startIdx = (coil.startSlot - 1 + Z) % Z;
+                    const endIdx   = (coil.endSlot   - 1 + Z) % Z;
+
+                    // top side
+                    slots[startIdx].top = {
+                        phase: coil.phase,
+                        polarity: coil.polarity,
+                        pole: coil.pole,
+                        coilEnd: coil.endSlot,
+                        coilId: coil.id,
+                        layer: 'top'
+                    };
+
+                    // bottom side (return)
+                    slots[endIdx].bottom = {
+                        phase: coil.phase,
+                        polarity: coil.polarity === 'pos' ? 'neg' : 'pos',
+                        pole: coil.pole,
+                        coilStart: coil.startSlot,
+                        coilId: coil.id,
                         layer: 'bottom'
                     };
-                }
+
+                    coilList.push(coil);
+                });
             }
         }
     } else {
-        // Fractional q (simple pattern)
+        // ===== Fractional-slot (general) =====
         const qCeil  = Math.ceil(q);
         const qFloor = Math.floor(q);
         let slotIndex = 0;
+        let coilId = 1;
+        const phases = ['A', 'B', 'C'];
 
         for (let pole = 0; pole < p2; pole++) {
-            // A
-            for (let s = 0; s < qCeil && slotIndex < Z; s++) {
-                const endSlot = (slotIndex + y) % Z;
-                slots[slotIndex].top = {
-                    phase: 'A',
-                    polarity: pole % 2 === 0 ? 'pos' : 'neg',
-                    pole: Math.floor(pole / 2) + 1,
-                    coilEnd: endSlot + 1,
-                    layer: 'top'
-                };
-                slotIndex++;
-            }
-            // B
-            for (let s = 0; s < qCeil && slotIndex < Z; s++) {
-                const endSlot = (slotIndex + y) % Z;
-                slots[slotIndex].top = {
-                    phase: 'B',
-                    polarity: pole % 2 === 0 ? 'pos' : 'neg',
-                    pole: Math.floor(pole / 2) + 1,
-                    coilEnd: endSlot + 1,
-                    layer: 'top'
-                };
-                slotIndex++;
-            }
-            // C
-            for (let s = 0; s < qFloor && slotIndex < Z; s++) {
-                const endSlot = (slotIndex + y) % Z;
-                slots[slotIndex].top = {
-                    phase: 'C',
-                    polarity: pole % 2 === 0 ? 'pos' : 'neg',
-                    pole: Math.floor(pole / 2) + 1,
-                    coilEnd: endSlot + 1,
-                    layer: 'top'
-                };
-                slotIndex++;
-            }
-        }
+            for (const phase of phases) {
+                const nCoils = phase === 'C' ? qFloor : qCeil;
+                const localCoils = [];
 
-        // bottom layer
-        for (let i = 0; i < Z; i++) {
-            if (slots[i].top && slots[i].top.coilEnd) {
-                const endSlotIndex = (slots[i].top.coilEnd - 1 + Z) % Z;
-                if (slots[endSlotIndex]) {
-                    slots[endSlotIndex].bottom = {
-                        phase: slots[i].top.phase,
-                        polarity: slots[i].top.polarity === 'pos' ? 'neg' : 'pos',
-                        pole: slots[i].top.pole,
-                        coilStart: i + 1,
+                // build coils
+                for (let s = 0; s < nCoils && slotIndex < Z; s++) {
+                    const startIdx = slotIndex;
+                    const endIdx   = (startIdx + y) % Z;
+
+                    localCoils.push({
+                        id: coilId++,
+                        phase,
+                        pole: Math.floor(pole / 2) + 1,
+                        startSlot: startIdx + 1,
+                        endSlot: endIdx + 1,
+                        polarity: pole % 2 === 0 ? 'pos' : 'neg',
+                        nextCoil: null
+                    });
+
+                    slotIndex++;
+                }
+
+                // order and link series
+                localCoils.sort((c1, c2) => c1.startSlot - c2.startSlot);
+                for (let i = 0; i < localCoils.length - 1; i++) {
+                    localCoils[i].nextCoil = localCoils[i + 1].id;
+                }
+
+                // write into slots and push to global list
+                localCoils.forEach(coil => {
+                    const startIdx = (coil.startSlot - 1 + Z) % Z;
+                    const endIdx   = (coil.endSlot   - 1 + Z) % Z;
+
+                    slots[startIdx].top = {
+                        phase: coil.phase,
+                        polarity: coil.polarity,
+                        pole: coil.pole,
+                        coilEnd: coil.endSlot,
+                        coilId: coil.id,
+                        layer: 'top'
+                    };
+
+                    slots[endIdx].bottom = {
+                        phase: coil.phase,
+                        polarity: coil.polarity === 'pos' ? 'neg' : 'pos',
+                        pole: coil.pole,
+                        coilStart: coil.startSlot,
+                        coilId: coil.id,
                         layer: 'bottom'
                     };
-                }
+
+                    coilList.push(coil);
+                });
             }
         }
     }
 
-    return slots;
+    return { slots, coilList };
 }
 
 // ========= Results & legend =========
@@ -446,7 +559,7 @@ function createLegend(elementId) {
 
 // ========= Linear diagram =========
 
-function drawLinearDiagram(winding, Z, y) {
+function drawLinearDiagram(winding, Z) {
     const canvas = document.getElementById('linearCanvas');
     const ctx = canvas.getContext('2d');
 
@@ -466,7 +579,7 @@ function drawLinearDiagram(winding, Z, y) {
     ctx.textAlign = 'left';
     ctx.fillText('Double Layer Winding - Linear Hairpin Diagram', 20, 30);
 
-    // slots and block labels
+    // draw slots
     winding.forEach((slot, i) => {
         const x = i * slotWidth;
 
@@ -543,80 +656,77 @@ function drawLinearDiagram(winding, Z, y) {
         }
     });
 
+    // coils: follow top-side to bottom-side, show series continuity using coil ids
     ctx.lineWidth = 3;
     ctx.globalAlpha = 0.9;
     ctx.textAlign = 'center';
     ctx.font = '10px Arial';
 
-    // top-start coils
     const topHairpinHeight = 60;
+    const bottomHairpinHeight = 60;
+
     let topCoilIndex = 1;
+    let bottomCoilIndex = 1;
 
+    // top-start hairpins
     if (activeLayerFilter !== 'BOTTOM') {
-        winding.forEach((slot, i) => {
-            if (slot.top && slot.top.coilEnd) {
-                if (activePhaseFilter !== 'ALL' && slot.top.phase !== activePhaseFilter) return;
+        coils.forEach(coil => {
+            const startIndex = (coil.startSlot - 1 + Z) % Z;
+            const endIndex   = (coil.endSlot   - 1 + Z) % Z;
 
-                const startIndex = i;
-                const endIndex   = (slot.top.coilEnd - 1 + Z) % Z;
+            if (activePhaseFilter !== 'ALL' && coil.phase !== activePhaseFilter) return;
 
-                const x1 = startIndex * slotWidth + slotWidth / 2;
-                const x2 = endIndex   * slotWidth + slotWidth / 2;
+            const x1 = startIndex * slotWidth + slotWidth / 2;
+            const x2 = endIndex   * slotWidth + slotWidth / 2;
 
-                const color = colors[`${slot.top.phase}_${slot.top.polarity}`];
-                ctx.strokeStyle = color;
+            const color = colors[`${coil.phase}_${coil.polarity}`];
+            ctx.strokeStyle = color;
 
-                const offset = ((topCoilIndex - 1) % 3) * 8;
-                const midY   = topEdgeY - topHairpinHeight - offset;
+            const offset = ((topCoilIndex - 1) % 3) * 8;
+            const midY   = topEdgeY - topHairpinHeight - offset;
 
-                ctx.beginPath();
-                ctx.moveTo(x1, topEdgeY);
-                ctx.lineTo(x1, midY);
-                ctx.lineTo(x2, midY);
-                ctx.lineTo(x2, botEdgeY);
-                ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(x1, topEdgeY);
+            ctx.lineTo(x1, midY);
+            ctx.lineTo(x2, midY);
+            ctx.lineTo(x2, botEdgeY);
+            ctx.stroke();
 
-                ctx.fillStyle = color;
-                ctx.fillText(`T${topCoilIndex}`, (x1 + x2) / 2, midY - 4);
+            ctx.fillStyle = color;
+            ctx.fillText(`C${coil.id}`, (x1 + x2) / 2, midY - 4);
 
-                topCoilIndex++;
-            }
+            topCoilIndex++;
         });
     }
 
-    // bottom-start coils
-    const bottomHairpinHeight = 60;
-    let bottomCoilIndex = 1;
-
+    // bottom-start hairpins (return path)
     if (activeLayerFilter !== 'TOP') {
-        winding.forEach((slot, i) => {
-            if (slot.bottom && slot.bottom.coilStart) {
-                if (activePhaseFilter !== 'ALL' && slot.bottom.phase !== activePhaseFilter) return;
+        coils.forEach(coil => {
+            const startIndex = (coil.startSlot - 1 + Z) % Z;
+            const endIndex   = (coil.endSlot   - 1 + Z) % Z;
 
-                const startIndex = (slot.bottom.coilStart - 1 + Z) % Z;
-                const endIndex   = i;
+            if (activePhaseFilter !== 'ALL' && coil.phase !== activePhaseFilter) return;
 
-                const x1 = startIndex * slotWidth + slotWidth / 2;
-                const x2 = endIndex   * slotWidth + slotWidth / 2;
+            const x1 = startIndex * slotWidth + slotWidth / 2;
+            const x2 = endIndex   * slotWidth + slotWidth / 2;
 
-                const color = colors[`${slot.bottom.phase}_${slot.bottom.polarity}`];
-                ctx.strokeStyle = color;
+            const color = colors[`${coil.phase}_${coil.polarity === 'pos' ? 'neg' : 'pos'}`];
+            ctx.strokeStyle = color;
 
-                const offset = ((bottomCoilIndex - 1) % 3) * 8;
-                const midY   = botEdgeY + bottomHairpinHeight + offset;
+            const offset = ((bottomCoilIndex - 1) % 3) * 8;
+            const midY   = botEdgeY + bottomHairpinHeight + offset;
 
-                ctx.beginPath();
-                ctx.moveTo(x1, botEdgeY);
-                ctx.lineTo(x1, midY);
-                ctx.lineTo(x2, midY);
-                ctx.lineTo(x2, topEdgeY);
-                ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(x1, botEdgeY);
+            ctx.lineTo(x1, midY);
+            ctx.lineTo(x2, midY);
+            ctx.lineTo(x2, topEdgeY);
+            ctx.stroke();
 
-                ctx.fillStyle = color;
-                ctx.fillText(`B${bottomCoilIndex}`, (x1 + x2) / 2, midY + 12);
+            ctx.fillStyle = color;
+            ctx.fillText(`C${coil.id}`, (x1 + x2) / 2, midY + 12);
 
-                bottomCoilIndex++;
-            }
+            bottomCoilIndex++;
         });
     }
 
@@ -626,16 +736,72 @@ function drawLinearDiagram(winding, Z, y) {
     ctx.fillStyle = '#333';
     ctx.font = '11px Arial';
     ctx.textAlign = 'left';
-    ctx.fillText('T# = coil starting from TOP layer (top → bottom)', 20, legendY);
-    ctx.fillText('B# = coil starting from BOTTOM layer (bottom → top)', 20, legendY + 14);
+    ctx.fillText('C# = coil in series chain (top → bottom)', 20, legendY);
     ctx.fillText(
         '+ / − = current direction in that coil side · use filters to isolate phases/layers',
         20,
-        legendY + 28
+        legendY + 14
     );
 }
+function drawSeriesChains(ctx, cx, cy, slotAngle, rChordTop, rChordBot, Z) {
+    const visited = new Set();
 
-// ========= Circular diagram =========
+    coils.forEach(coil => {
+        if (visited.has(coil.id)) return;
+        if (activePhaseFilter !== 'ALL' && coil.phase !== activePhaseFilter) return;
+
+        const chain = [];
+        let cur = coil;
+        while (cur && !visited.has(cur.id)) {
+            chain.push(cur);
+            visited.add(cur.id);
+            cur = coils.find(c => c.id === cur.nextCoil);
+        }
+
+        // draw even if chain.length === 1
+        if (chain.length === 0) return;
+
+        // TOP chain
+        if (activeLayerFilter !== 'BOTTOM') {
+            const colorTop = colors[`${coil.phase}_${coil.polarity}`];
+            ctx.strokeStyle = colorTop;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            chain.forEach((c, idx) => {
+                const idxSlot = (c.startSlot - 1 + Z) % Z;
+                const a = -Math.PI / 2 + (idxSlot + 0.5) * slotAngle;
+                const x = cx + rChordTop * Math.cos(a);
+                const y = cy + rChordTop * Math.sin(a);
+                if (idx === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+
+        // BOTTOM chain
+        if (activeLayerFilter !== 'TOP') {
+            const colorBot = colors[`${coil.phase}_${coil.polarity === 'pos' ? 'neg' : 'pos'}`];
+            ctx.strokeStyle = colorBot;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            chain.forEach((c, idx) => {
+                const idxSlot = (c.endSlot - 1 + Z) % Z;
+                const a = -Math.PI / 2 + (idxSlot + 0.5) * slotAngle;
+                const x = cx + rChordBot * Math.cos(a);
+                const y = cy + rChordBot * Math.sin(a);
+                if (idx === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+    });
+
+    ctx.setLineDash([]);
+}
+
+// ========= Circular diagram with full series chains =========
+
+/// ========= Circular diagram with clear 2‑layer webs + series chain =========
 
 function drawCircularDiagram(winding, Z) {
     const canvas = document.getElementById('circularCanvas');
@@ -647,30 +813,34 @@ function drawCircularDiagram(winding, Z) {
 
     const cx = size / 2;
     const cy = size / 2;
+
+    // slot rings (same as original)
     const rOuterTop = 250;
     const rInnerTop = 220;
     const rOuterBot = 210;
     const rInnerBot = 180;
-    const rChordTop = (rInnerTop + rOuterBot) / 2;
-    const rChordBot = (rInnerBot + rOuterBot) / 2;
+
+    // chord radii
+    const rTopChord = (rOuterTop + rInnerTop) / 2;
+    const rBotChord = (rOuterBot + rInnerBot) / 2;
 
     ctx.clearRect(0, 0, size, size);
+    const slotAngle = (2 * Math.PI) / Z;
 
-    const slotAngle = 2 * Math.PI / Z;
-
+    // ---------- title ----------
     ctx.fillStyle = '#1e3a8a';
     ctx.font = 'bold 18px Arial';
     ctx.textAlign = 'center';
     ctx.fillText('Double Layer Winding - Circular Diagram', cx, 30);
 
-    // slots
+    // ---------- slot sectors ----------
     for (let i = 0; i < Z; i++) {
         const slot = winding[i];
         const a0 = -Math.PI / 2 + i * slotAngle;
         const a1 = a0 + slotAngle;
         const am = (a0 + a1) / 2;
 
-        // top ring
+        // TOP ring
         if (activeLayerFilter !== 'BOTTOM') {
             let colorTop = '#e5e7eb';
             if (slot.top &&
@@ -688,6 +858,7 @@ function drawCircularDiagram(winding, Z) {
             ctx.lineWidth = 0.7;
             ctx.stroke();
 
+            // slot numbers
             ctx.fillStyle = '#111';
             ctx.font = '10px Arial';
             const rn = rOuterTop + 18;
@@ -696,6 +867,7 @@ function drawCircularDiagram(winding, Z) {
             ctx.textAlign = 'center';
             ctx.fillText(String(i + 1), nx, ny);
 
+            // top labels
             if (slot.top &&
                 (activePhaseFilter === 'ALL' || slot.top.phase === activePhaseFilter)) {
                 ctx.fillStyle = 'white';
@@ -708,7 +880,7 @@ function drawCircularDiagram(winding, Z) {
             }
         }
 
-        // bottom ring
+        // BOTTOM ring
         if (activeLayerFilter !== 'TOP') {
             let colorBot = '#e5e7eb';
             if (slot.bottom &&
@@ -741,66 +913,191 @@ function drawCircularDiagram(winding, Z) {
         }
     }
 
-    // coils
-    ctx.lineWidth = 2.3;
+    // ---------- helpers ----------
+    function angleForSlot(i) {
+        return -Math.PI / 2 + (i + 0.5) * slotAngle;
+    }
+
+    function topPoint(i) {
+        const a = angleForSlot(i);
+        return { x: cx + rTopChord * Math.cos(a), y: cy + rTopChord * Math.sin(a) };
+    }
+
+    function bottomPoint(i) {
+        const a = angleForSlot(i);
+        return { x: cx + rBotChord * Math.cos(a), y: cy + rBotChord * Math.sin(a) };
+    }
+
+    // -----------------------------------
+    // 1) clearer layer webs (local pitch y)
+    // -----------------------------------
+
+    // estimate y from first coil (same y for all)
+    let y = 1;
+    if (coils && coils.length) {
+        const c0 = coils[0];
+        const sIdx = (c0.startSlot - 1 + Z) % Z;
+        const eIdx = (c0.endSlot   - 1 + Z) % Z;
+        y = (eIdx - sIdx + Z) % Z;
+        if (y === 0) y = 1;
+    }
+
+    // TOP web: solid arcs on top ring
+    if (activeLayerFilter !== 'BOTTOM') {
+        ctx.globalAlpha = 0.6;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([]);
+
+        for (let i = 0; i < Z; i++) {
+            const top = winding[i].top;
+            if (!top) continue;
+            if (activePhaseFilter !== 'ALL' && top.phase !== activePhaseFilter) continue;
+
+            const j = (i + y) % Z;
+            const nxtTop = winding[j].top;
+            if (!nxtTop || nxtTop.phase !== top.phase) continue;
+
+            const a1 = angleForSlot(i);
+            const a2 = angleForSlot(j);
+
+            const color = colors[`${top.phase}_${top.polarity}`];
+            ctx.strokeStyle = color;
+
+            ctx.beginPath();
+            ctx.moveTo(
+                cx + rTopChord * Math.cos(a1),
+                cy + rTopChord * Math.sin(a1)
+            );
+            ctx.lineTo(
+                cx + rTopChord * Math.cos(a2),
+                cy + rTopChord * Math.sin(a2)
+            );
+            ctx.stroke();
+        }
+    }
+
+    // BOTTOM web: dashed arcs on bottom ring
+    if (activeLayerFilter !== 'TOP') {
+        ctx.globalAlpha = 0.6;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([8, 5]);
+
+        for (let i = 0; i < Z; i++) {
+            const bot = winding[i].bottom;
+            if (!bot) continue;
+            if (activePhaseFilter !== 'ALL' && bot.phase !== activePhaseFilter) continue;
+
+            const j = (i + y) % Z;
+            const nxtBot = winding[j].bottom;
+            if (!nxtBot || nxtBot.phase !== bot.phase) continue;
+
+            const a1 = angleForSlot(i);
+            const a2 = angleForSlot(j);
+
+            const color = colors[`${bot.phase}_${bot.polarity}`];
+            ctx.strokeStyle = color;
+
+            ctx.beginPath();
+            ctx.moveTo(
+                cx + rBotChord * Math.cos(a1),
+                cy + rBotChord * Math.sin(a1)
+            );
+            ctx.lineTo(
+                cx + rBotChord * Math.cos(a2),
+                cy + rBotChord * Math.sin(a2)
+            );
+            ctx.stroke();
+        }
+    }
+
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    // -----------------------------------
+    // 2) bold series chain (top ↔ bottom)
+    // -----------------------------------
+
+    ctx.lineWidth = 3;
     ctx.globalAlpha = 0.9;
 
-    if (activeLayerFilter !== 'BOTTOM') {
-        winding.forEach((slot, i) => {
-            if (slot.top && slot.top.coilEnd) {
-                if (activePhaseFilter !== 'ALL' && slot.top.phase !== activePhaseFilter) return;
+    const visited = new Set();
+    const phaseOrder = ['A', 'B', 'C'];
 
-                const startIndex = i;
-                const endIndex   = (slot.top.coilEnd - 1 + Z) % Z;
+    phaseOrder.forEach(phase => {
+        coils.forEach(startCoil => {
+            if (startCoil.phase !== phase) return;
+            if (activePhaseFilter !== 'ALL' && phase !== activePhaseFilter) return;
+            if (visited.has(startCoil.id)) return;
 
-                const aStart = -Math.PI / 2 + (startIndex + 0.5) * slotAngle;
-                const aEnd   = -Math.PI / 2 + (endIndex   + 0.5) * slotAngle;
-
-                const x1 = cx + rChordTop * Math.cos(aStart);
-                const y1 = cy + rChordTop * Math.sin(aStart);
-                const x2 = cx + rChordTop * Math.cos(aEnd);
-                const y2 = cy + rChordTop * Math.sin(aEnd);
-
-                const color = colors[`${slot.top.phase}_${slot.top.polarity}`];
-                ctx.strokeStyle = color;
-                ctx.beginPath();
-                ctx.moveTo(x1, y1);
-                ctx.lineTo(x2, y2);
-                ctx.stroke();
+            // build chain for this phase
+            const chain = [];
+            let c = startCoil;
+            while (c && !visited.has(c.id)) {
+                visited.add(c.id);
+                chain.push(c);
+                c = coils.find(k => k.id === c.nextCoil);
             }
+            if (!chain.length) return;
+
+            const phaseOffset =
+                phase === 'A' ? 0 :
+                phase === 'B' ? 5 : 10;
+
+            chain.forEach((coil, idx) => {
+                const startIdx = (coil.startSlot - 1 + Z) % Z;
+                const endIdx   = (coil.endSlot   - 1 + Z) % Z;
+
+                const colorTop = colors[`${phase}_${coil.polarity}`];
+                const colorBot = colors[
+                    `${phase}_${coil.polarity === 'pos' ? 'neg' : 'pos'}`
+                ];
+
+                // segment 1: top(start) -> bottom(end)
+                if (activeLayerFilter !== 'BOTTOM') {
+                    const a1 = angleForSlot(startIdx);
+                    const a2 = angleForSlot(endIdx);
+
+                    const x1 = cx + (rTopChord - phaseOffset) * Math.cos(a1);
+                    const y1 = cy + (rTopChord - phaseOffset) * Math.sin(a1);
+                    const x2 = cx + (rBotChord + phaseOffset) * Math.cos(a2);
+                    const y2 = cy + (rBotChord + phaseOffset) * Math.sin(a2);
+
+                    ctx.strokeStyle = colorTop;
+                    ctx.setLineDash([]);
+                    ctx.beginPath();
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                    ctx.stroke();
+                }
+
+                // segment 2: bottom(end) -> top(start of next coil)
+                const next = chain[idx + 1] || null;
+                if (next && activeLayerFilter !== 'TOP') {
+                    const nextStartIdx = (next.startSlot - 1 + Z) % Z;
+
+                    const a1b = angleForSlot(endIdx);
+                    const a2b = angleForSlot(nextStartIdx);
+
+                    const xb1 = cx + (rBotChord + phaseOffset) * Math.cos(a1b);
+                    const yb1 = cy + (rBotChord + phaseOffset) * Math.sin(a1b);
+                    const xb2 = cx + (rTopChord - phaseOffset) * Math.cos(a2b);
+                    const yb2 = cy + (rTopChord - phaseOffset) * Math.sin(a2b);
+
+                    ctx.strokeStyle = colorBot;
+                    ctx.setLineDash([6, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(xb1, yb1);
+                    ctx.lineTo(xb2, yb2);
+                    ctx.stroke();
+                }
+            });
         });
-    }
+    });
 
-    if (activeLayerFilter !== 'TOP') {
-        ctx.setLineDash([6, 4]);
-        winding.forEach((slot, i) => {
-            if (slot.bottom && slot.bottom.coilStart) {
-                if (activePhaseFilter !== 'ALL' && slot.bottom.phase !== activePhaseFilter) return;
-
-                const startIndex = (slot.bottom.coilStart - 1 + Z) % Z;
-                const endIndex   = i;
-
-                const aStart = -Math.PI / 2 + (startIndex + 0.5) * slotAngle;
-                const aEnd   = -Math.PI / 2 + (endIndex   + 0.5) * slotAngle;
-
-                const x1 = cx + rChordBot * Math.cos(aStart);
-                const y1 = cy + rChordBot * Math.sin(aStart);
-                const x2 = cx + rChordBot * Math.cos(aEnd);
-                const y2 = cy + rChordBot * Math.sin(aEnd);
-
-                const color = colors[`${slot.bottom.phase}_${slot.bottom.polarity}`];
-                ctx.strokeStyle = color;
-                ctx.beginPath();
-                ctx.moveTo(x1, y1);
-                ctx.lineTo(x2, y2);
-                ctx.stroke();
-            }
-        });
-        ctx.setLineDash([]);
-    }
-
+    ctx.setLineDash([]);
     ctx.globalAlpha = 1;
 }
+
 
 // ========= Winding table =========
 
@@ -977,18 +1274,19 @@ function resizeCanvases() {
 
     if (currentWinding) {
         const Z = currentWinding.length;
-        drawLinearDiagram(currentWinding, Z, 0);
+        drawLinearDiagram(currentWinding, Z);
         drawCircularDiagram(currentWinding, Z);
     }
 }
 
 window.addEventListener('resize', resizeCanvases);
 window.addEventListener('orientationchange', resizeCanvases);
-// Theme toggle with localStorage
+
+// ========= Theme toggle with localStorage =========
+
 const themeToggleBtn = document.getElementById('themeToggle');
 
 if (themeToggleBtn) {
-    // default = dark; savedTheme can be 'dark' or 'light'
     const savedTheme = localStorage.getItem('theme') || 'dark';
 
     if (savedTheme === 'light') {
@@ -1005,3 +1303,8 @@ if (themeToggleBtn) {
         themeToggleBtn.textContent = isLight ? '🌙 Dark' : '☀️ Light';
     });
 }
+
+        themeToggleBtn.textContent = isLight ? '🌙 Dark' : '☀️ Light';
+    });
+}
+
