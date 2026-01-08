@@ -3,20 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title> Three-Phase Winding Calculator</title>
+    <title>Three-Phase Winding Calculator</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <!-- Navigation -->
     <nav class="navbar">
         <div class="logo">
-          
         </div>
         <div class="nav-links">
             <button class="nav-btn active" onclick="showPage('dashboard', this)">Dashboard</button>
             <button class="nav-btn" onclick="showPage('calculator', this)">Calculator</button>
             <button class="nav-btn" onclick="showPage('guide', this)">Guide</button>
-<a class="nav-btn" href="theory.html">Theory</a>
+            <a class="nav-btn" href="theory.html">Theory</a>
             <button class="nav-btn" id="themeToggle" type="button">🌙 Dark</button>
         </div>
     </nav>
@@ -110,10 +109,11 @@
                         </select>
                     </div>
 
+                    <!-- NEW: offset instead of absolute coil pitch -->
                     <div class="form-group" id="pitchInputGroup" style="display: none;">
-                        <label for="coilPitch">Coil Pitch (y)</label>
-                        <input type="number" id="coilPitch" min="1">
-                        <small>Enter value less than pole pitch</small>
+                        <label for="coilOffset">Pitch Offset (slots)</label>
+                        <input type="number" id="coilOffset" min="1" step="1">
+                        <small>Offset = τ − y (e.g. 1 slot short-pitch)</small>
                     </div>
 
                     <button class="calculate-btn" onclick="calculate()">⚡ Calculate Winding</button>
@@ -134,6 +134,15 @@
                                 <button class="tab-btn" onclick="showDiagram('circular', this)">Circular</button>
                                 <button class="tab-btn" onclick="showDiagram('table', this)">Table</button>
                             </div>
+<div class="animation-controls">
+    <button type="button" onclick="startWindingAnimation()">▶ Play</button>
+    <button type="button" onclick="pauseWindingAnimation()">⏸ Pause</button>
+    <button type="button" onclick="resetWindingAnimation()">⟲ Reset</button>
+    <label style="margin-left:10px;">
+        Speed:
+        <input type="range" id="animSpeed" min="0.2" max="2" step="0.2" value="1">
+    </label>
+</div>
 
                             <!-- Linear diagram -->
                             <div id="linearDiagram" class="diagram-content active">
@@ -142,12 +151,12 @@
 
                                 <div id="linearFilters"
                                      style="margin: 12px auto 0; text-align: center; max-width: 1000px;">
-                                    <button onclick="setPhaseFilter('ALL')"   class="filter-btn">All phases</button>
-                                    <button onclick="setPhaseFilter('A')"     class="filter-btn">Phase A</button>
-                                    <button onclick="setPhaseFilter('B')"     class="filter-btn">Phase B</button>
-                                    <button onclick="setPhaseFilter('C')"     class="filter-btn">Phase C</button>
-                                    <button onclick="setLayerFilter('BOTH')"  class="filter-btn">Top+Bottom</button>
-                                    <button onclick="setLayerFilter('TOP')"   class="filter-btn">Top only</button>
+                                    <button onclick="setPhaseFilter('ALL')"    class="filter-btn">All phases</button>
+                                    <button onclick="setPhaseFilter('A')"      class="filter-btn">Phase A</button>
+                                    <button onclick="setPhaseFilter('B')"      class="filter-btn">Phase B</button>
+                                    <button onclick="setPhaseFilter('C')"      class="filter-btn">Phase C</button>
+                                    <button onclick="setLayerFilter('BOTH')"   class="filter-btn">Top+Bottom</button>
+                                    <button onclick="setLayerFilter('TOP')"    class="filter-btn">Top only</button>
                                     <button onclick="setLayerFilter('BOTTOM')" class="filter-btn">Bottom only</button>
                                 </div>
                             </div>
@@ -159,12 +168,12 @@
 
                                 <div id="circularFilters"
                                      style="margin: 12px auto 0; text-align: center; max-width: 1000px;">
-                                    <button onclick="setPhaseFilter('ALL')"   class="filter-btn">All phases</button>
-                                    <button onclick="setPhaseFilter('A')"     class="filter-btn">Phase A</button>
-                                    <button onclick="setPhaseFilter('B')"     class="filter-btn">Phase B</button>
-                                    <button onclick="setPhaseFilter('C')"     class="filter-btn">Phase C</button>
-                                    <button onclick="setLayerFilter('BOTH')"  class="filter-btn">Top+Bottom</button>
-                                    <button onclick="setLayerFilter('TOP')"   class="filter-btn">Top only</button>
+                                    <button onclick="setPhaseFilter('ALL')"    class="filter-btn">All phases</button>
+                                    <button onclick="setPhaseFilter('A')"      class="filter-btn">Phase A</button>
+                                    <button onclick="setPhaseFilter('B')"      class="filter-btn">Phase B</button>
+                                    <button onclick="setPhaseFilter('C')"      class="filter-btn">Phase C</button>
+                                    <button onclick="setLayerFilter('BOTH')"   class="filter-btn">Top+Bottom</button>
+                                    <button onclick="setLayerFilter('TOP')"    class="filter-btn">Top only</button>
                                     <button onclick="setLayerFilter('BOTTOM')" class="filter-btn">Bottom only</button>
                                 </div>
                             </div>
@@ -265,13 +274,7 @@
 
     <!-- Full Theory Page (imported content) -->
     <div id="theory-full" class="page">
-        <!-- 
-            Paste ALL your old theory HTML content here,
-            from the hero section, cards, long explanations,
-            tables, and the “Application” part, but WITHOUT:
-            - <html>, <head>, <body>
-            - its <style> and <script> tags
-        -->
+        <!-- your extra theory content goes here -->
     </div>
 
     <!-- Modal for info popups -->
@@ -285,4 +288,3 @@
     <script src="app.js"></script>
 </body>
 </html>
-
